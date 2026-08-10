@@ -1,17 +1,6 @@
-#
-# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# Description: Build OpenWrt using GitHub Actions
-#
-
-name: Build OpenWrt
+name: Build OpenWrt (Official)
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
       ssh:
@@ -20,171 +9,275 @@ on:
         default: 'false'
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-24.10
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_COWTRANSFER: false
-  UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
+
+  UPLOAD_FIRMWARE: true
+
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@main
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2004)
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+      # =========================
+      # Checkout
+      # =========================
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Clone source code
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+      # =========================
+      # Node.js 24
+      # =========================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+      # =========================
+      # 初始化环境
+      # =========================
+      - name: Initialization environment
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/*
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            g++ \
+            gawk \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            python3-distutils \
+            rsync \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget \
+            curl \
+            jq \
+            xsltproc \
+            libxml-parser-perl \
+            libelf-dev \
+            ecj \
+            fastjar \
+            java-propose-classpath \
+            swig \
+            time
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
+          sudo timedatectl set-timezone "$TZ"
 
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      # =========================
+      # Clone Official OpenWrt
+      # =========================
+      - name: Clone source code
+        run: |
+          git clone --depth=1 \
+            -b "$REPO_BRANCH" \
+            "$REPO_URL" openwrt
 
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+      # =========================
+      # 显示版本
+      # =========================
+      - name: Show OpenWrt version
+        run: |
+          cd openwrt
+          git log -1 --oneline
+          echo "OpenWrt branch: $REPO_BRANCH"
 
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-      env:
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      # =========================
+      # Cache dl
+      # =========================
+      - name: Cache dl
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: openwrt-dl-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            openwrt-dl-${{ runner.os }}-
 
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+      # =========================
+      # 自定义 feeds
+      # =========================
+      - name: Load custom feeds
+        run: |
+          [ -e feeds.conf.default ] && mv feeds.conf.default openwrt/
 
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> "$GITHUB_OUTPUT"
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+          if [ -f "$DIY_P1_SH" ]; then
+            chmod +x "$DIY_P1_SH"
+            cd openwrt
+            ../"$DIY_P1_SH"
+            cd ..
+          fi
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+      # =========================
+      # Update feeds
+      # =========================
+      - name: Update & Install feeds
+        run: |
+          cd openwrt
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
-        echo "status=success" >> "$GITHUB_OUTPUT"
+      # =========================
+      # 加载配置
+      # =========================
+      - name: Load configuration
+        run: |
+          [ -e files ] && mv files openwrt/files
+          [ -e "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
+          if [ -f "$DIY_P2_SH" ]; then
+            chmod +x "$DIY_P2_SH"
+            cd openwrt
+            ../"$DIY_P2_SH"
+            cd ..
+          fi
 
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d' ')" >> "$GITHUB_OUTPUT"
+      # =========================
+      # 检查目标设备
+      # =========================
+      - name: Check target
+        run: |
+          cd openwrt
 
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d' ')" >> "$GITHUB_OUTPUT"
+          grep CONFIG_TARGET_qualcommax .config || true
+          grep CONFIG_TARGET_qualcommax_ipq60xx .config || true
+          grep CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01 .config || true
 
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
-        touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
-        echo "status=success" >> "$GITHUB_OUTPUT"
+      # =========================
+      # 检查 firewall4 / nftables
+      # =========================
+      - name: Check firewall configuration
+        run: |
+          cd openwrt
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+          echo "===== firewall4 ====="
+          grep CONFIG_PACKAGE_firewall4 .config || true
 
-    - name: Delete workflow runs
-      uses: GitRML/delete-workflow-runs@main
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
+          echo "===== nftables ====="
+          grep CONFIG_PACKAGE_nftables .config || true
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "===== nft modules ====="
+          grep 'CONFIG_PACKAGE_kmod-nft-' .config || true
+
+          echo "===== dnsmasq ====="
+          grep 'CONFIG_PACKAGE_dnsmasq' .config || true
+
+          echo "===== PassWall ====="
+          grep 'CONFIG_PACKAGE_luci-app-passwall' .config || true
+
+      # =========================
+      # SSH 调试
+      # =========================
+      - name: SSH connection
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: github.event.inputs.ssh == 'true'
+
+      # =========================
+      # 生成最终配置
+      # =========================
+      - name: Defconfig
+        run: |
+          cd openwrt
+          make defconfig
+
+      # =========================
+      # 再次检查最终配置
+      # =========================
+      - name: Verify final config
+        run: |
+          cd openwrt
+
+          echo "===== TARGET ====="
+          grep '^CONFIG_TARGET.*=y' .config || true
+
+          echo "===== FIREWALL ====="
+          grep -E '^CONFIG_PACKAGE_(firewall4|nftables|dnsmasq-full)=y' .config || true
+
+          echo "===== NFT ====="
+          grep '^CONFIG_PACKAGE_kmod-nft-' .config || true
+
+          echo "===== PASSWALL ====="
+          grep '^CONFIG_PACKAGE_luci-app-passwall' .config || true
+
+      # =========================
+      # 下载依赖
+      # =========================
+      - name: Download packages
+        run: |
+          cd openwrt
+
+          make download -j8
+
+          find dl -size -1024c -delete
+
+      # =========================
+      # 编译
+      # =========================
+      - name: Compile
+        id: compile
+        run: |
+          cd openwrt
+
+          set -e
+
+          make -j$(nproc) V=s
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+          DEVICE=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config \
+            | sed -r 's/.*DEVICE_(.*)=y/\1/' \
+            | head -n1)
+
+          echo "DEVICE_NAME=_${DEVICE}" >> "$GITHUB_ENV"
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+
+      # =========================
+      # 整理固件
+      # =========================
+      - name: Organize firmware
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt/bin/targets/*/*
+
+          rm -rf packages
+
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+
+      # =========================
+      # 上传固件
+      # =========================
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        if: steps.compile.outputs.status == 'success'
+        with:
+          name: OpenWrt${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
+
+      # =========================
+      # 清理旧 Artifact
+      # =========================
+      - name: Delete old artifacts
+        run: |
+          gh api "repos/${{ github.repository }}/actions/artifacts" \
+            --paginate \
+            --jq '.artifacts[] | select(.expired==false) | .id' \
+            | tail -n +10 \
+            | while read id; do
+                gh api -X DELETE \
+                  "repos/${{ github.repository }}/actions/artifacts/$id"
+              done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
