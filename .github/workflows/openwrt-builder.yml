@@ -1,4 +1,4 @@
-name: Build OpenWrt (Official)
+name: Build OpenWrt (Official 24.10)
 
 on:
   workflow_dispatch:
@@ -7,58 +7,85 @@ on:
         description: 'SSH connection to Actions'
         required: false
         default: 'false'
+        type: boolean
 
 env:
+  # =========================
+  # OpenWrt 官方源码
+  # =========================
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: openwrt-24.10
+
+  # =========================
+  # 自定义文件
+  # =========================
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
+
+  # =========================
+  # 时区
+  # =========================
   TZ: Asia/Shanghai
 
-  UPLOAD_FIRMWARE: true
-
+  # =========================
+  # GitHub Actions Node.js 24
+  # =========================
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+
   build:
-    runs-on: ubuntu-latest
+
+    # 固定 Ubuntu 版本，避免 latest 环境变化
+    runs-on: ubuntu-24.04
 
     steps:
 
-      # =========================
-      # Checkout
-      # =========================
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # =========================
-      # Node.js 24
-      # =========================
-      - name: Setup Node.js
+      # ============================================================
+      # 2. Node.js 24
+      # ============================================================
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      # =========================
-      # 初始化环境
-      # =========================
+      # ============================================================
+      # 3. 初始化编译环境
+      # ============================================================
       - name: Initialization environment
         run: |
-          sudo rm -rf /etc/apt/sources.list.d/*
+          set -e
+
+          echo "========================================"
+          echo "Updating APT"
+          echo "========================================"
+
           sudo apt-get update
+
+          echo "========================================"
+          echo "Installing OpenWrt build dependencies"
+          echo "========================================"
+
           sudo apt-get install -y \
             build-essential \
             clang \
             flex \
             bison \
-            g++ \
             gawk \
             gettext \
             git \
             libncurses-dev \
             libssl-dev \
-            python3-distutils \
+            python3 \
+            python3-pip \
+            python3-venv \
             rsync \
             unzip \
             zlib1g-dev \
@@ -69,36 +96,45 @@ jobs:
             xsltproc \
             libxml-parser-perl \
             libelf-dev \
-            ecj \
-            fastjar \
-            java-propose-classpath \
             swig \
-            time
+            time \
+            ccache
 
           sudo timedatectl set-timezone "$TZ"
 
-      # =========================
-      # Clone Official OpenWrt
-      # =========================
-      - name: Clone source code
+          echo "========================================"
+          echo "Environment ready"
+          echo "========================================"
+
+      # ============================================================
+      # 4. Clone OpenWrt 官方源码
+      # ============================================================
+      - name: Clone OpenWrt source
         run: |
-          git clone --depth=1 \
+          set -e
+
+          echo "========================================"
+          echo "Clone OpenWrt"
+          echo "========================================"
+
+          git clone \
+            --depth=1 \
             -b "$REPO_BRANCH" \
-            "$REPO_URL" openwrt
+            "$REPO_URL" \
+            openwrt
 
-      # =========================
-      # 显示版本
-      # =========================
-      - name: Show OpenWrt version
-        run: |
           cd openwrt
-          git log -1 --oneline
-          echo "OpenWrt branch: $REPO_BRANCH"
 
-      # =========================
-      # Cache dl
-      # =========================
-      - name: Cache dl
+          echo "========================================"
+          echo "OpenWrt version"
+          echo "========================================"
+
+          git log -1 --oneline
+
+      # ============================================================
+      # 5. 缓存 OpenWrt dl
+      # ============================================================
+      - name: Cache OpenWrt dl
         uses: actions/cache@v4
         with:
           path: openwrt/dl
@@ -106,132 +142,261 @@ jobs:
           restore-keys: |
             openwrt-dl-${{ runner.os }}-
 
-      # =========================
-      # 自定义 feeds
-      # =========================
+      # ============================================================
+      # 6. 加载 feeds.conf.default
+      # ============================================================
       - name: Load custom feeds
         run: |
-          [ -e feeds.conf.default ] && mv feeds.conf.default openwrt/
+          set -e
+
+          echo "========================================"
+          echo "Loading feeds.conf.default"
+          echo "========================================"
+
+          if [ -f feeds.conf.default ]; then
+            cp feeds.conf.default openwrt/feeds.conf.default
+          fi
 
           if [ -f "$DIY_P1_SH" ]; then
             chmod +x "$DIY_P1_SH"
+
             cd openwrt
+
             ../"$DIY_P1_SH"
-            cd ..
           fi
 
-      # =========================
-      # Update feeds
-      # =========================
-      - name: Update & Install feeds
-        run: |
+          echo "========================================"
+          echo "Final feeds.conf.default"
+          echo "========================================"
+
           cd openwrt
 
+          cat feeds.conf.default
+
+      # ============================================================
+      # 7. Update feeds
+      # ============================================================
+      - name: Update feeds
+        run: |
+          set -e
+
+          cd openwrt
+
+          echo "========================================"
+          echo "Updating feeds"
+          echo "========================================"
+
           ./scripts/feeds update -a
+
+      # ============================================================
+      # 8. Install feeds
+      # ============================================================
+      - name: Install feeds
+        run: |
+          set -e
+
+          cd openwrt
+
+          echo "========================================"
+          echo "Installing feeds"
+          echo "========================================"
+
           ./scripts/feeds install -a
 
-      # =========================
-      # 加载配置
-      # =========================
+      # ============================================================
+      # 9. 检查 PassWall
+      # ============================================================
+      - name: Check PassWall
+        run: |
+          set -e
+
+          cd openwrt
+
+          echo "========================================"
+          echo "Searching PassWall"
+          echo "========================================"
+
+          find feeds package -maxdepth 5 \
+            \( -iname '*passwall*' -o -iname '*passwall2*' \) \
+            -print || true
+
+      # ============================================================
+      # 10. 加载 files 和 .config
+      # ============================================================
       - name: Load configuration
         run: |
-          [ -e files ] && mv files openwrt/files
-          [ -e "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
+          set -e
+
+          echo "========================================"
+          echo "Loading .config"
+          echo "========================================"
+
+          if [ -d files ]; then
+            cp -a files openwrt/files
+          fi
+
+          if [ -f "$CONFIG_FILE" ]; then
+            cp "$CONFIG_FILE" openwrt/.config
+          else
+            echo "ERROR: .config not found!"
+            exit 1
+          fi
 
           if [ -f "$DIY_P2_SH" ]; then
             chmod +x "$DIY_P2_SH"
+
             cd openwrt
+
             ../"$DIY_P2_SH"
-            cd ..
           fi
 
-      # =========================
-      # 检查目标设备
-      # =========================
-      - name: Check target
+      # ============================================================
+      # 11. 检查目标设备
+      # ============================================================
+      - name: Check target device
+        run: |
+          set -e
+
+          cd openwrt
+
+          echo "========================================"
+          echo "Target configuration"
+          echo "========================================"
+
+          grep '^CONFIG_TARGET_qualcommax=y' .config || true
+          grep '^CONFIG_TARGET_qualcommax_ipq60xx=y' .config || true
+          grep '^CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y' .config || true
+
+      # ============================================================
+      # 12. 检查 firewall4 / nftables / PassWall
+      # ============================================================
+      - name: Check firewall and PassWall configuration
         run: |
           cd openwrt
 
-          grep CONFIG_TARGET_qualcommax .config || true
-          grep CONFIG_TARGET_qualcommax_ipq60xx .config || true
-          grep CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01 .config || true
+          echo "========================================"
+          echo "Firewall4"
+          echo "========================================"
 
-      # =========================
-      # 检查 firewall4 / nftables
-      # =========================
-      - name: Check firewall configuration
-        run: |
-          cd openwrt
+          grep '^CONFIG_PACKAGE_firewall4=' .config || true
 
-          echo "===== firewall4 ====="
-          grep CONFIG_PACKAGE_firewall4 .config || true
+          echo "========================================"
+          echo "nftables"
+          echo "========================================"
 
-          echo "===== nftables ====="
-          grep CONFIG_PACKAGE_nftables .config || true
+          grep '^CONFIG_PACKAGE_nftables=' .config || true
 
-          echo "===== nft modules ====="
-          grep 'CONFIG_PACKAGE_kmod-nft-' .config || true
+          echo "========================================"
+          echo "NFT kernel modules"
+          echo "========================================"
 
-          echo "===== dnsmasq ====="
-          grep 'CONFIG_PACKAGE_dnsmasq' .config || true
+          grep '^CONFIG_PACKAGE_kmod-nft-' .config || true
 
-          echo "===== PassWall ====="
-          grep 'CONFIG_PACKAGE_luci-app-passwall' .config || true
+          echo "========================================"
+          echo "dnsmasq"
+          echo "========================================"
 
-      # =========================
-      # SSH 调试
-      # =========================
+          grep '^CONFIG_PACKAGE_dnsmasq' .config || true
+
+          echo "========================================"
+          echo "iptables modules"
+          echo "========================================"
+
+          grep '^CONFIG_PACKAGE_iptables-mod-' .config || true
+
+          echo "========================================"
+          echo "PassWall"
+          echo "========================================"
+
+          grep '^CONFIG_PACKAGE_luci-app-passwall' .config || true
+
+      # ============================================================
+      # 13. SSH 调试
+      # ============================================================
       - name: SSH connection
         uses: P3TERX/ssh2actions@v1.0.0
         if: github.event.inputs.ssh == 'true'
 
-      # =========================
-      # 生成最终配置
-      # =========================
-      - name: Defconfig
+      # ============================================================
+      # 14. 生成最终配置
+      # ============================================================
+      - name: Generate final configuration
         run: |
+          set -e
+
           cd openwrt
+
+          echo "========================================"
+          echo "Running make defconfig"
+          echo "========================================"
+
           make defconfig
 
-      # =========================
-      # 再次检查最终配置
-      # =========================
-      - name: Verify final config
+      # ============================================================
+      # 15. 检查 defconfig 后的最终配置
+      # ============================================================
+      - name: Verify final configuration
         run: |
+          set -e
+
           cd openwrt
 
-          echo "===== TARGET ====="
+          echo "========================================"
+          echo "TARGET"
+          echo "========================================"
+
           grep '^CONFIG_TARGET.*=y' .config || true
 
-          echo "===== FIREWALL ====="
-          grep -E '^CONFIG_PACKAGE_(firewall4|nftables|dnsmasq-full)=y' .config || true
+          echo "========================================"
+          echo "FIREWALL"
+          echo "========================================"
 
-          echo "===== NFT ====="
+          grep -E \
+            '^CONFIG_PACKAGE_(firewall4|nftables|dnsmasq-full)=y' \
+            .config || true
+
+          echo "========================================"
+          echo "NFT"
+          echo "========================================"
+
           grep '^CONFIG_PACKAGE_kmod-nft-' .config || true
 
-          echo "===== PASSWALL ====="
+          echo "========================================"
+          echo "PASSWALL"
+          echo "========================================"
+
           grep '^CONFIG_PACKAGE_luci-app-passwall' .config || true
 
-      # =========================
-      # 下载依赖
-      # =========================
+      # ============================================================
+      # 16. 下载源码包
+      # ============================================================
       - name: Download packages
         run: |
+          set -e
+
           cd openwrt
+
+          echo "========================================"
+          echo "Downloading packages"
+          echo "========================================"
 
           make download -j8
 
           find dl -size -1024c -delete
 
-      # =========================
-      # 编译
-      # =========================
-      - name: Compile
+      # ============================================================
+      # 17. 编译
+      # ============================================================
+      - name: Compile OpenWrt
         id: compile
         run: |
+          set -e
+
           cd openwrt
 
-          set -e
+          echo "========================================"
+          echo "Starting OpenWrt build"
+          echo "========================================"
 
           make -j$(nproc) V=s
 
@@ -242,23 +407,38 @@ jobs:
             | head -n1)
 
           echo "DEVICE_NAME=_${DEVICE}" >> "$GITHUB_ENV"
+
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
 
-      # =========================
-      # 整理固件
-      # =========================
+          echo "========================================"
+          echo "Build completed"
+          echo "========================================"
+
+      # ============================================================
+      # 18. 整理固件
+      # ============================================================
       - name: Organize firmware
         if: steps.compile.outputs.status == 'success'
         run: |
+          set -e
+
           cd openwrt/bin/targets/*/*
+
+          echo "========================================"
+          echo "Firmware directory"
+          echo "========================================"
+
+          pwd
+
+          ls -lah
 
           rm -rf packages
 
           echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
 
-      # =========================
-      # 上传固件
-      # =========================
+      # ============================================================
+      # 19. 上传固件
+      # ============================================================
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         if: steps.compile.outputs.status == 'success'
@@ -266,18 +446,34 @@ jobs:
           name: OpenWrt${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
 
-      # =========================
-      # 清理旧 Artifact
-      # =========================
+      # ============================================================
+      # 20. 清理旧 Artifact
+      # ============================================================
       - name: Delete old artifacts
+        if: success()
         run: |
-          gh api "repos/${{ github.repository }}/actions/artifacts" \
-            --paginate \
-            --jq '.artifacts[] | select(.expired==false) | .id' \
-            | tail -n +10 \
+          echo "========================================"
+          echo "Cleaning old artifacts"
+          echo "========================================"
+
+          gh api \
+            "repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[]
+              | select(.expired == false)
+              | [.id, .created_at]
+              | @tsv' \
+            | sort -k2 -r \
+            | tail -n +11 \
+            | cut -f1 \
             | while read id; do
-                gh api -X DELETE \
-                  "repos/${{ github.repository }}/actions/artifacts/$id"
+
+                echo "Deleting artifact: $id"
+
+                gh api \
+                  -X DELETE \
+                  "repos/${{ github.repository }}/actions/artifacts/$id" || true
+
               done
+
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
